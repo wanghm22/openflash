@@ -1,6 +1,8 @@
 #include <global.h>
 #include <register.h>
-
+#define FRAGINBLOCK 4176*32*24
+#define PAGEINBLOCK 4176
+#define CACHENUM 32
 extern void fv_nand_erase(word iw_head_blk);
 extern void fv_nand_read(void);
 extern void fv_nand_n4k(byte ib_n4rd_idx, byte ib_cmd_hit);
@@ -13,7 +15,9 @@ extern dwrd gd_ht_token;
 extern dwrd gd_gc_token;
 extern dwrd gd_ht_weight;
 
-dwrd *gd_l2p_tbl;
+//originalcode:dwrd *gd_l2p_tbl;
+block *gd_l2p_blk_tbl;
+cacheblock *gd_l2p_blk_cache_tbl;
 #ifdef FTL_DBG
 dwrd *gd_p2l_tbl;
 dwrd *gd_vmap_tbl;
@@ -40,9 +44,9 @@ PHY_ADR gs_head_padr[HEAD_QNTY];
 word gw_htp2l_bfp = 8;
 word gw_htp2l_ofs = 0;
 dwrd gd_htp2l_ladr[4];
-
+byte found=0;//cache中是否有对应页
 byte gb_htwl_sel = 0;
-
+byte find=0;//cache中是否有对应块
 #ifdef FTL_DBG
 dwrd gd_htp2l_ptr;
 #endif
@@ -124,7 +128,60 @@ void fv_ftl_hdl(void)
     {
 #ifndef LGET_EN
         //rb_cdir_bas = (byte)rs_host_cmd.sd_cmd_lext;
-        rs_host_cmd.sd_cmd_padr = gd_l2p_tbl[rs_host_cmd.sd_cmd_ladr];
+        //originalcode:rs_host_cmd.sd_cmd_padr = gd_l2p_tbl[rs_host_cmd.sd_cmd_ladr];
+        int blockidx=rs_host_cmd.sd_cmd_ladr/FRAGINBLOCK;
+        int blockoffset=rs_host_cmd.sd_cmd_ladr%FRAGINBLOCK;
+        uint16_t smallidx=blockoffset%64;
+        uint16_t smalloffset=blockoffset/64;
+        int thecacheidx=0;
+        found=0;//在cache中是否找到了这个frag
+        find=0;//在cache中是否找到了这个block
+        rs_host_cmd.sd_cmd_padr = P2L_NULL;
+        for(int i=0;i<CACHENUM;++i){
+            if(gd_l2p_blk_cache_tbl[i].blockidx==blockidx){
+                find=1;
+                thecacheidx=i;
+                int bucketgroupnum=gd_l2p_blk_cache_tbl[i].originblock.number/(1<<14);//计算有多少个bucketgroup
+                for(int j=0;j<=bucketgroupnum;++j){
+                    for(int k=0;k<gd_l2p_blk_cache_tbl[i].originblock.bucketgroup_ptr[j].bucketgroup[smallidx].num;++k){
+                        if(gd_l2p_blk_cache_tbl[i].originblock.bucketgroup_ptr[j].bucketgroup[smallidx].keyvaluegroup[k].lba_key==smalloffset){
+                            found=1;
+                           int offset= gd_l2p_blk_cache_tbl[i].originblock.bucketgroup_ptr[j].bucketgroup[smallidx].keyvaluegroup[k].write_offset+(1<<14)*k;
+                           int pageidx=offset/(24*32);
+                           offset=offset%(24*32);
+                           int ceidx=offset/(8*24);
+                           offset=offset%(8*24);
+                           int chidx=offset/24;
+                           offset=offset%24;
+                           rs_host_cmd.sd_cmd_padr=(gd_l2p_blk_cache_tbl[i].originblock.block_padr<<23)+(pageidx<<10)+(ceidx<<8)+(chidx<<5)+offset;
+                            break;
+                        }
+                    }
+                    if(found==1){break;}
+                    }
+                }
+            if(found==1){break;}
+            }
+        
+        if(found==0){
+            int bucketgroupnum=gd_l2p_blk_tbl[blockidx].number/(1<<14);//计算有多少个bucketgroup
+        for(int i=0;i<=bucketgroupnum;++i){
+            for(int j=0;j<gd_l2p_blk_tbl[blockidx].bucketgroup_ptr[i].bucketgroup[smallidx].num;++j){
+                if(gd_l2p_blk_tbl[blockidx].bucketgroup_ptr[i].bucketgroup[smallidx].keyvaluegroup[j].lba_key==smalloffset){
+                       
+                        int offset= gd_l2p_blk_tbl[blockidx].bucketgroup_ptr[i].bucketgroup[smallidx].keyvaluegroup[j].write_offset+(1<<14)*j;
+                        int pageidx=offset/(24*32);
+                        offset=offset%(24*32);
+                        int ceidx=offset/(8*24);
+                        offset=offset%(8*24);
+                        int chidx=offset/24;
+                        offset=offset%24;
+                        rs_host_cmd.sd_cmd_padr=(gd_l2p_blk_tbl[blockidx].block_padr<<23)+(pageidx<<10)+(ceidx<<8)+(chidx<<5)+offset;
+                        break;
+                        }
+            }
+        }
+    }
 #endif
 
 #ifdef N4KA_EN
@@ -133,7 +190,7 @@ void fv_ftl_hdl(void)
 #endif
 
         //nand read cmd handle
-        if(rs_host_cmd.sb_cmd_type == HCMD_RD)//read command
+        if(rs_host_cmd.sb_cmd_type == HCMD_RD)
         {
 #ifdef HWCMD_CHK
             fv_uart_print("r%x,%x,%x,%x,%x\r\n", (rs_host_cmd.sd_cmd_cid >> 7), rs_host_cmd.sd_cmd_ladr, rs_host_cmd.sb_cmd_ftl, rs_host_cmd.sb_cmd_crd, rs_host_cmd.sb_cmd_crl);
@@ -242,13 +299,28 @@ void fv_ftl_hdl(void)
 #endif
 
             //set head blk index for p4k_jump
-            rb_head_idx = rs_host_cmd.sb_cmd_strm;//stream id(now always 0)
+            rb_head_idx = rs_host_cmd.sb_cmd_strm;
             ARM_NOP(); //wait 3 cycle for HW handle
 
             do
             {
-                lb_cmd_end = (rb_frag_loc == ((FRAG_QNTY - 1)) && (rb_gwln_loc == rb_gwln_end)) ? 1 : 0;
-                ld_cmd_padr = rd_hp4k_loc;//rd_hp4k_loc is the next valid ppn
+                //计算在无重写情况下应该写进的位置，并检查plane和page是否满足写入条件
+                
+                ld_cmd_padr = (dwrd)gd_l2p_blk_tbl[blockidx].block_padr<<23;
+                byte three_page=0;
+                byte full_plane=0;
+                int thenumber=gd_l2p_blk_tbl[blockidx].number;
+                if(thenumber%3==2){three_page=1;}
+                ld_cmd_padr+=(thenumber/768)<<10;
+                thenumber=thenumber%768;
+                ld_cmd_padr+=(thenumber/192)<<8;
+                thenumber=thenumber%192;
+                ld_cmd_padr+=(thenumber/24)<<5;
+                thenumber=thenumber%24;
+                if(thenumber==23){full_plane=1;}
+                ld_cmd_padr+=thenumber;
+                lb_cmd_end=0;
+                if(three_page==1 && full_plane==1){lb_cmd_end=1;}
 
                 if(lb_p2lp_act) //p2l page
                 {
@@ -281,7 +353,7 @@ void fv_ftl_hdl(void)
                     ld_buf_ptr = (dwrd)rs_host_cmd.sw_cmd_bfp;
 
                     //original vcnt
-                    if(rs_host_cmd.sd_cmd_padr != L2P_NULL)//重写
+                    if(rs_host_cmd.sd_cmd_padr != L2P_NULL)
                     {
 #ifdef FTL_DBG
                         byte lb_vmap_ofs;
@@ -293,16 +365,56 @@ void fv_ftl_hdl(void)
                         }
                         gd_vmap_tbl[(rs_host_cmd.sd_cmd_padr >> (5 - CMPR_SHIFT))] &= ~(1 << lb_vmap_ofs);
 #endif
-                        lw_cmd_blk = (word)(rs_host_cmd.sd_cmd_padr >> (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT));
+                        
+                        lw_cmd_blk = gd_l2p_blk_tbl[blockidx].block_padr;//目前所在块
+                        byte full=1;//cache是否满了
+                        int cacheidx;
+                        if(found==0){
+                        if(find==0){
+                             for(int i=0;i<CACHENUM;++i){
+                            if(gd_l2p_blk_cache_tbl[i].originblock.number==0){
+                                
+                               full=0;
+                                cacheidx=i;
+                                ld_cmd_padr =gd_l2p_blk_cache_tbl[i].originblock.block_padr ;
+                                gd_l2p_blk_cache_tbl[cacheidx].blockidx=blockidx;
+                                gd_l2p_blk_cache_tbl[cacheidx].originblock.ladr_buck[smallidx].bucket[gd_l2p_blk_cache_tbl[cacheidx].originblock.ladr_buck[smallidx].num].key=smalloffset;
+                                gd_l2p_blk_cache_tbl[cacheidx].originblock.ladr_buck[smallidx].bucket[gd_l2p_blk_cache_tbl[cacheidx].originblock.ladr_buck[smallidx].num].offset=0;
+                                gd_l2p_blk_cache_tbl[cacheidx].originblock.ladr_buck[smallidx].num+=1;
+                                gd_l2p_blk_cache_tbl[cacheidx].originblock.number+=1;
+                                break;
+                            }
+                        }
+                        }
+                        
+                        if(find==1){
+                            for(int i=0;i<CACHENUM;++i){
+                            if(gd_l2p_blk_cache_tbl[i].blockidx==blockidx){
+                               ld_cmd_padr= gd_l2p_blk_cache_tbl[i].originblock.block_padr+gd_l2p_blk_cache_tbl[i].originblock.number*1024;
+                               cacheidx=i;
+                                gd_l2p_blk_cache_tbl[cacheidx].originblock.ladr_buck[smallidx].bucket[gd_l2p_blk_cache_tbl[cacheidx].originblock.ladr_buck[smallidx].num].key=smalloffset;
+                                gd_l2p_blk_cache_tbl[cacheidx].originblock.ladr_buck[smallidx].bucket[gd_l2p_blk_cache_tbl[cacheidx].originblock.ladr_buck[smallidx].num].offset=gd_l2p_blk_cache_tbl[cacheidx].originblock.number;
+                                gd_l2p_blk_cache_tbl[cacheidx].originblock.ladr_buck[smallidx].num+=1;
+                                gd_l2p_blk_cache_tbl[cacheidx].originblock.number+=1;
+                                break;
+                            }
+                        }
+                        }
+                    }
+                        // if(found==1){
+                        //     lw_cmd_blk = (word)(gd_l2p_blk_tbl[blockidx].block_padr >> (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT));
+                        // }
                         if(gd_vcnt_tbl[lw_cmd_blk] == 0)
                         {
                             fv_uart_print("host vld cnt table err: block:%x\r\n", lw_cmd_blk);
                             fv_dbg_loop(0x8);
                         }
-                        gd_vcnt_tbl[lw_cmd_blk]--;//gd_vcnt_tbl表示了每个块中有效页的数量
+                        if(found==0){gd_vcnt_tbl[lw_cmd_blk]--;}
+                        
 
-                        if((gd_vcnt_tbl[lw_cmd_blk] == 0) && ((gb_blk_type[lw_cmd_blk] & HEAD_BLK) == 0x0))
+                        if(found==1||((find==0)&&(full==1)))//originalcode:if((gd_vcnt_tbl[lw_cmd_blk] == 0) && ((gb_blk_type[lw_cmd_blk] & HEAD_BLK) == 0x0)),need to change
                         {
+                            lw_cmd_blk = (word)(gd_l2p_blk_tbl[blockidx].block_padr >> (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT));
                             if((gb_blk_type[lw_cmd_blk] & VCNT_BLK) == 0x0)
                             {
                                 fv_uart_print("host_wr release block err: block: %d\r\n", lw_cmd_blk);
@@ -331,44 +443,59 @@ void fv_ftl_hdl(void)
                                 }
                             }
                         }
+                       
                     }
 
-                    //get free block
-                    if((rb_head_stg == 0x0) && ((gw_htp2l_ofs & CMPR_MASK) == 0x0))
-                    {
-                        //check free block
-                        if(gw_fblk_num == 0x0)
-                        {
-                            fv_uart_print("ht free blk zero\r\n");
-                            fv_dbg_loop(0x1);
-                        }
+                    //originalcode:get free block
+//                     if((rb_head_stg == 0x0) && ((gw_htp2l_ofs & CMPR_MASK) == 0x0))
+//                     {
+//                         //check free block
+//                         if(gw_fblk_num == 0x0)
+//                         {
+//                             fv_uart_print("ht free blk zero\r\n");
+//                             fv_dbg_loop(0x1);
+//                         }
 
-                        //update blk info
-                        lw_cmd_blk = gw_fblk_str;
-                        gw_fblk_str = (lw_cmd_blk == gw_fblk_end) ? DBLK_INVLD : gs_dbl_tbl[lw_cmd_blk].wd.w_next_ptr;
-                        gb_blk_type[lw_cmd_blk] = HEAD_BLK;
-                        gw_fblk_num--;
-                        fv_uart_print("host_wr get new blk: blk_num:%x, free blk cnt:%d\r\n", lw_cmd_blk, gw_fblk_num);
-                        if(gw_fblk_num == (GC_BLK_THR - 1))
-                        {
-                            fv_uart_print("gc task start: host\r\n");
-                        }
+//                         //update blk info
+//                         lw_cmd_blk = gw_fblk_str;
+//                         gw_fblk_str = (lw_cmd_blk == gw_fblk_end) ? DBLK_INVLD : gs_dbl_tbl[lw_cmd_blk].wd.w_next_ptr;
+//                         gb_blk_type[lw_cmd_blk] = HEAD_BLK;
+//                         gw_fblk_num--;
+//                         fv_uart_print("host_wr get new blk: blk_num:%x, free blk cnt:%d\r\n", lw_cmd_blk, gw_fblk_num);
+//                         if(gw_fblk_num == (GC_BLK_THR - 1))
+//                         {
+//                             fv_uart_print("gc task start: host\r\n");
+//                         }
+//                         int number=0;
+//                         if(find==0){
+//                         for(int i=0;i<CACHENUM;++i){
+//                             if(gd_l2p_blk_cache_tbl[i].originblock.==0){
+                                
+//                                 lw_cmd_blk = gd_l2p_blk_cache_tbl[i].originblock.block_padr>>(1<<23);
+//                                 break;
+//                             }
+//                         }}
+//                         rw_hblk_loc = lw_cmd_blk;
+//                         ld_cmd_padr = (dwrd)lw_cmd_blk << (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT)+ number*(1024);
+// #ifdef FTL_DBG
+//                         gd_htp2l_ptr = (dwrd)lw_cmd_blk << (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT + CMPR_SHIFT);
+// #endif
 
-                        rw_hblk_loc = lw_cmd_blk;
-                        ld_cmd_padr = (dwrd)lw_cmd_blk << (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT);
-#ifdef FTL_DBG
-                        gd_htp2l_ptr = (dwrd)lw_cmd_blk << (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT + CMPR_SHIFT);
-#endif
-
-                        //send erase cmd to HW
-                        while(rw_cpua_set & CPUA_ACT);
-                        fv_nand_erase(lw_cmd_blk);
-                        gd_ecnt_tbl[lw_cmd_blk]++;
-                    }
+//                         //send erase cmd to HW
+//                         while(rw_cpua_set & CPUA_ACT);
+//                         fv_nand_erase(lw_cmd_blk);
+//                         gd_ecnt_tbl[lw_cmd_blk]++;
+//                     }
 
                     //write l2p & vcnt table
-                    gd_l2p_tbl[rs_host_cmd.sd_cmd_ladr] = ld_cmd_padr;
-                    gd_vcnt_tbl[rw_hblk_loc]++;
+                    else{
+                    gd_l2p_blk_tbl[blockidx].ladr_buck[smallidx].bucket[gd_l2p_blk_tbl[blockidx].ladr_buck[smallidx].num].key =smalloffset;
+                    gd_l2p_blk_tbl[blockidx].ladr_buck[smallidx].bucket[gd_l2p_blk_tbl[blockidx].ladr_buck[smallidx].num].offset=gd_l2p_blk_tbl[blockidx].number;
+                    gd_l2p_blk_tbl[blockidx].ladr_buck[smallidx].num+=1;
+                    gd_l2p_blk_tbl[blockidx].number+=1;
+                    
+                }
+                gd_vcnt_tbl[rw_hblk_loc]++;
 #ifdef FTL_DBG
                     gb_crl_tbl[rs_host_cmd.sd_cmd_ladr] = (byte)gw_htp2l_ofs & CMPR_MASK;
 
