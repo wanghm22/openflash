@@ -1,13 +1,10 @@
 #include <global.h>
 #include <register.h>
 
-#define PAGEINBLOCK 4176
-#define CACHENUM 32
 extern void fv_nand_erase(word iw_head_blk);
 extern void fv_nand_gcprg(byte ib_cmd_end, dwrd id_cmd_bptr, dwrd id_cmd_padr);
 
-extern block *gd_l2p_blk_tbl;
-extern cacheblock *gd_l2p_blk_cache_tbl;
+extern ch* gd_l2p_ch;
 extern byte *gb_crl_tbl;
 extern dwrd gd_vcnt_tbl[RBLK_QNTY];
 extern dwrd gd_ecnt_tbl[RBLK_QNTY];
@@ -18,7 +15,7 @@ extern PHY_ADR gs_head_padr[HEAD_QNTY];
 extern word gw_fblk_str;
 extern word gw_fblk_end;
 extern word gw_fblk_num;
-int thecacheidx;
+
 dwrd gd_min_vcnt;
 byte gb_gcblk_vld = 0;
 word gw_gcblk_num = 0;
@@ -470,19 +467,10 @@ void fv_ftl_gc(void)
             ARM_NOP(); //wait 3 cycle for HW handle
 
             do
-            {   
-                int blockidx=rs_host_cmd.sd_cmd_padr/PAGEINBLOCK;
-        int offset=rs_host_cmd.sd_cmd_padr%PAGEINBLOCK;
-        uint8_t smallidx=offset%32;
-        uint8_t smalloffset=offset/32;
+            {
                 lb_cmd_end = (rb_frag_loc == ((FRAG_QNTY - 1)) && (rb_gwln_loc == rb_gwln_end)) ? 1 : 0;
-                //originalcode:ld_cmd_padr = rd_hp4k_loc;
-                for(int i=0;i<CACHENUM;++i){
-                    if(gd_l2p_blk_cache_tbl[i].blockidx==blockidx){
-                        thecacheidx=i;
-                       ld_cmd_padr= gd_l2p_blk_cache_tbl[i].originblock.block_padr+gd_l2p_blk_cache_tbl[i].originblock.number*1024;
-                    }
-                }
+                ld_cmd_padr = rd_hp4k_loc;
+
                 if(lb_p2lp_act) //p2l page
                 {
                     ld_buf_ptr = (FTL_GCP2L_BASE >> 12) | (dwrd)lb_p2lp_ptr;
@@ -613,23 +601,80 @@ void fv_ftl_gc(void)
                                 fv_dbg_loop(0x17);
                             }
 #endif
-                            int blockidx=rs_host_cmd.sd_cmd_padr/PAGEINBLOCK;
-                            int offset=rs_host_cmd.sd_cmd_padr%PAGEINBLOCK;
-                            uint8_t smallidx=offset%32;
-                            uint8_t smalloffset=offset/32;
-                            gd_l2p_blk_tbl[blockidx].ladr_buck[smallidx].bucket[gd_l2p_blk_tbl[blockidx].ladr_buck[smallidx].num].key =smalloffset;
-                            gd_l2p_blk_tbl[blockidx].ladr_buck[smallidx].bucket[gd_l2p_blk_tbl[blockidx].ladr_buck[smallidx].num].offset=gd_l2p_blk_tbl[blockidx].number;
-                            gd_l2p_blk_tbl[blockidx].ladr_buck[smallidx].num+=1;
-                            gd_l2p_blk_tbl[blockidx].number+=1;
+
                             //write l2p & vcnt table
-                            gd_l2p_blk_tbl[blockidx].block_padr = gd_l2p_blk_cache_tbl[thecacheidx].originblock.block_padr;
-                            gd_l2p_blk_cache_tbl[thecacheidx].originblock.number--;
-                            for(int i=0;i<gd_l2p_blk_cache_tbl[thecacheidx].originblock.ladr_buck[smallidx].num;++i){
-                                if(smalloffset==gd_l2p_blk_cache_tbl[thecacheidx].originblock.ladr_buck[smallidx].bucket[i].key){
-                                        gd_l2p_blk_cache_tbl[thecacheidx].originblock.ladr_buck[smallidx].bucket[i].key=200;
-                                        
-                                }
-                            }
+    // uint32_t sd_cmd_ladr = rs_host_cmd.sd_cmd_ladr;
+    // int chidx = sd_cmd_ladr / (4*360*4176*24);
+    // sd_cmd_ladr = sd_cmd_ladr % (4*360*4176*24);
+    // int ceidx = (sd_cmd_ladr ) / (360*4176*24);
+    // sd_cmd_ladr = sd_cmd_ladr % (360*4176*24);
+    // int blockidx = sd_cmd_ladr / (4176*24);
+    // uint32_t blockoffset = sd_cmd_ladr % (4176*24);
+    
+    // uint16_t smallidx = blockoffset % 512;
+    // uint8_t smalloffset = blockoffset / 512;
+    
+    // block* lp_block = &gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx];
+    
+    // // 从物理地址解析目标块信息
+    // byte lb_dst_chidx, lb_dst_ceidx;
+    // word lw_dst_blkidx, lw_dst_pageidx;
+    // byte lb_dst_fragoffset;
+    
+    // lb_dst_chidx = (id_ppn >> 5) & 0x7;
+    // lb_dst_ceidx = (id_ppn >> 8) & 0x3;
+    // lw_dst_blkidx = (id_ppn >> 23) & 0x1FF;
+    // lw_dst_pageidx = (id_ppn >> 10) & 0x1FFF;
+    // lb_dst_fragoffset = id_ppn & 0x1F;
+    
+    // // 计算在目标block内的写入偏移
+    // dwrd ld_dst_block_offset = lw_dst_pageidx * 24 + lb_dst_fragoffset;
+    
+    // // 查找是否已存在映射（覆盖写情况）
+    // int found = 0;
+    // for(int i = 0; i < 2 && !found; i++) {
+    //     for(int j = 0; j < lp_block->bucketgroup_ptr[i].bucketgroup[smallidx].num; j++) {
+    //         if(lp_block->bucketgroup_ptr[i].bucketgroup[smallidx].keyvaluegroup[j].lba_key == smalloffset) {
+    //             // 更新现有映射到新位置
+    //             lp_block->bucketgroup_ptr[i].bucketgroup[smallidx].keyvaluegroup[j].write_offset = ld_dst_block_offset;
+    //             found = 1;
+                
+    //             // 更新目标块的block_padr（如果是新块）
+    //             if(lp_block->block_padr != lw_dst_blkidx) {
+    //                 lp_block->block_padr = lw_dst_blkidx;
+    //             }
+    //             break;
+    //         }
+    //     }
+    // }
+    
+    // if(!found) {
+    //     // 添加新映射
+    //     int bucket_group = (ld_dst_block_offset < (1<<16)) ? 0 : 1;
+    //     uint16_t local_offset = ld_dst_block_offset % (1<<16);
+        
+    //     bucket* lp_bucket = &lp_block->bucketgroup_ptr[bucket_group].bucketgroup[smallidx];
+        
+    //     // 检查bucket是否已满，需要定义MAX_BUCKET_SIZE
+    //     if(lp_bucket->num < MAX_BUCKET_SIZE) {
+    //         lp_bucket->keyvaluegroup[lp_bucket->num].lba_key = smalloffset;
+    //         lp_bucket->keyvaluegroup[lp_bucket->num].write_offset = local_offset;
+    //         lp_bucket->num++;
+            
+    //         // 更新目标块的block_padr
+    //         lp_block->block_padr = lw_dst_blkidx;
+            
+    //         // 更新block中的总写入计数
+    //         if(ld_dst_block_offset >= lp_block->number) {
+    //             lp_block->number = ld_dst_block_offset + 1;
+    //         }
+    //     } else {
+    //         // Bucket已满，需要处理（可以触发bucket分裂或返回错误）
+    //         fv_uart_print("Bucket full error: chidx:%d, ceidx:%d, blockidx:%d, smallidx:%d\n", 
+    //                      chidx, ceidx, blockidx, smallidx);
+    //     }
+    // }
+    
                             gd_vcnt_tbl[rw_hblk_loc]++;
 #ifdef FTL_DBG
                             gb_crl_tbl[ld_cmd_ladr] = (byte)gw_gcp2l_ofs & CMPR_MASK;

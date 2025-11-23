@@ -1,7 +1,7 @@
 #include <global.h>
 #include <register.h>
 
-extern dwrd *gd_l2p_tbl;
+extern ch *gd_l2p_ch;
 #ifdef FTL_DBG
 extern dwrd *gd_p2l_tbl;
 extern dwrd *gd_vmap_tbl;
@@ -342,7 +342,27 @@ void fv_ftl_pre(void)
 {
     byte lb_cnt;
 
-    gd_l2p_tbl = (dwrd *)(FTL_L2P_BASE);
+    gd_l2p_ch = (ch *)(FTL_L2P_BASE);
+    for(int i=0;i<8;++i){
+        for(int j=0;j<4;++j){
+            gd_l2p_ch[i].cegroup[j].cache[0]=360;
+            gd_l2p_ch[i].cegroup[j].cache[1]=361;
+            gd_l2p_ch[i].cegroup[j].cache[2]=362;
+            gd_l2p_ch[i].cegroup[j].canuse[0]=1;
+            gd_l2p_ch[i].cegroup[j].canuse[1]=1;
+            gd_l2p_ch[i].cegroup[j].canuse[2]=1;
+            for(int k=0;k<360;++k){
+                gd_l2p_ch[i].cegroup[j].blockgroup[k].number=0;
+                gd_l2p_ch[i].cegroup[j].blockgroup[k].block_padr=k;
+                for(int l=0;l<512;++l){
+                     gd_l2p_ch[i].cegroup[j].blockgroup[k].bucketgroup_ptr[0].bucketgroup[l].num=0;
+                     gd_l2p_ch[i].cegroup[j].blockgroup[k].bucketgroup_ptr[0].bucketgroup[l].keyvaluegroup=NULL;
+                     gd_l2p_ch[i].cegroup[j].blockgroup[k].bucketgroup_ptr[1].bucketgroup[l].num=0;
+                     gd_l2p_ch[i].cegroup[j].blockgroup[k].bucketgroup_ptr[1].bucketgroup[l].keyvaluegroup=NULL;
+                }
+            }
+        }
+    }
 #ifdef FTL_DBG
     gd_p2l_tbl = (dwrd *)(FTL_P2L_BASE);
     gd_vmap_tbl = (dwrd *)(FTL_VMAP_BASE);
@@ -557,5 +577,4 @@ void fv_ftl_init(void)
     //vFtlTableCheck();
 
     return;
-    
 }
