@@ -1,11 +1,17 @@
 #include <global.h>
 #include <register.h>
-
+#define FRAGINBLOCK (4176*24)
+#define CACHENUM 3
+#define CHANNELINDEX (360*4176*24*4)
+#define CEINDEX (360*4176*24)
+#define BUCKETNUM 512
+#define FRAGINPAGE 24
 extern void fv_nand_erase(word iw_head_blk);
 extern void fv_nand_read(void);
 extern void fv_nand_n4k(byte ib_n4rd_idx, byte ib_cmd_hit);
 #ifndef CPUA_PROC
 extern void fv_nand_htprg(byte ib_cmd_end, dwrd id_cmd_bptr, dwrd id_cmd_padr);
+extern void fv_nand_gcprg(byte ib_cmd_end, dwrd id_cmd_bptr, dwrd id_cmd_padr);
 #endif
 extern void fv_ftl_oth(void);
 
@@ -13,7 +19,9 @@ extern dwrd gd_ht_token;
 extern dwrd gd_gc_token;
 extern dwrd gd_ht_weight;
 
-dwrd *gd_l2p_tbl;
+//originalcode:dwrd *gd_l2p_tbl;
+ch* gd_l2p_ch;//8个channel
+
 #ifdef FTL_DBG
 dwrd *gd_p2l_tbl;
 dwrd *gd_vmap_tbl;
@@ -42,7 +50,7 @@ word gw_htp2l_ofs = 0;
 dwrd gd_htp2l_ladr[4];
 
 byte gb_htwl_sel = 0;
-
+byte find=0;//cache中是否有对应块
 #ifdef FTL_DBG
 dwrd gd_htp2l_ptr;
 #endif
@@ -99,6 +107,25 @@ void fv_ftl_hdl(void)
     byte lb_p2lp_ptr = 0;
     byte lb_raid_act = 0;
     byte lb_cmd_end;
+    uint32_t sd_cmd_ladr;
+    uint8_t chidx;
+    uint8_t ceidx;
+    uint16_t blockidx;
+    uint32_t blockoffset;
+    uint16_t smallidx;
+    uint8_t smalloffset;
+    uint8_t find;
+    uint16_t cache_padr;
+    uint8_t cache_idx;
+    uint32_t thenumber;
+    uint16_t blocktogc;
+    block newblock;
+    dwrd ld_src_padr;
+    dwrd ld_dst_padr;
+    uint8_t appear[FRAGINBLOCK];
+    int i;
+    int j;
+    int k;
 #ifdef N4KA_EN
     byte lb_n4rd_vld;
     byte lb_sect_cnt;
@@ -124,7 +151,35 @@ void fv_ftl_hdl(void)
     {
 #ifndef LGET_EN
         //rb_cdir_bas = (byte)rs_host_cmd.sd_cmd_lext;
-        rs_host_cmd.sd_cmd_padr = gd_l2p_tbl[rs_host_cmd.sd_cmd_ladr];
+        //originalcode:rs_host_cmd.sd_cmd_padr = gd_l2p_tbl[rs_host_cmd.sd_cmd_ladr];
+        sd_cmd_ladr=rs_host_cmd.sd_cmd_ladr;
+        chidx=sd_cmd_ladr/CHANNELINDEX;
+        sd_cmd_ladr=sd_cmd_ladr%CHANNELINDEX;
+        ceidx=sd_cmd_ladr/CEINDEX;
+        sd_cmd_ladr=sd_cmd_ladr%CEINDEX;
+        blockidx=sd_cmd_ladr/FRAGINBLOCK;
+        blockoffset=sd_cmd_ladr%FRAGINBLOCK;
+        smallidx=blockoffset%BUCKETNUM;
+        smalloffset=blockoffset/BUCKETNUM;
+
+        
+        find=0;
+        rs_host_cmd.sd_cmd_padr = L2P_NULL;
+        
+        
+        
+        
+        for(i=1;i>=0;--i){
+            for(j=gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[i].bucketgroup[smallidx].num-1;j>=0;--j){
+                if(gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[i].bucketgroup[smallidx].keyvaluegroup[j].lba_key==smalloffset){
+                        rs_host_cmd.sd_cmd_padr=(gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].block_padr<<23)+(((gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[i].bucketgroup[smallidx].keyvaluegroup[j].write_offset+(1<<16)*j)/FRAGINPAGE)<<10)+(ceidx<<8)+(chidx<<5)+(gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[i].bucketgroup[smallidx].keyvaluegroup[j].write_offset+(1<<16)*j)%FRAGINPAGE;
+                        find=1;
+                        break;
+                        }
+            }
+            if(find==1) break;
+        }
+    
 #endif
 
 #ifdef N4KA_EN
@@ -133,7 +188,7 @@ void fv_ftl_hdl(void)
 #endif
 
         //nand read cmd handle
-        if(rs_host_cmd.sb_cmd_type == HCMD_RD)//read command
+        if(rs_host_cmd.sb_cmd_type == HCMD_RD)
         {
 #ifdef HWCMD_CHK
             fv_uart_print("r%x,%x,%x,%x,%x\r\n", (rs_host_cmd.sd_cmd_cid >> 7), rs_host_cmd.sd_cmd_ladr, rs_host_cmd.sb_cmd_ftl, rs_host_cmd.sb_cmd_crd, rs_host_cmd.sb_cmd_crl);
@@ -142,7 +197,8 @@ void fv_ftl_hdl(void)
                 rb_host_get = HCMD_INV;
                 continue;
             }
-#endif
+#endif      
+            // fv_uart_print("read_logical_address:%u,read_physical_address:%u",rs_host_cmd.sd_cmd_ladr,rs_host_cmd.sd_cmd_padr);
             while(rw_cpua_set & CPUA_ACT);
             fv_nand_read();
 
@@ -240,17 +296,110 @@ void fv_ftl_hdl(void)
                 }
             }
 #endif
-
+        //    fv_uart_print("start write!");
             //set head blk index for p4k_jump
-            rb_head_idx = rs_host_cmd.sb_cmd_strm;//stream id(now always 0)
+            rb_head_idx = rs_host_cmd.sb_cmd_strm;
             ARM_NOP(); //wait 3 cycle for HW handle
 
             do
             {
-                lb_cmd_end = (rb_frag_loc == ((FRAG_QNTY - 1)) && (rb_gwln_loc == rb_gwln_end)) ? 1 : 0;
-                ld_cmd_padr = rd_hp4k_loc;//rd_hp4k_loc is the next valid ppn
-
-                if(lb_p2lp_act) //p2l page
+                lb_cmd_end=0;
+                thenumber=0;
+                
+                ld_cmd_padr = (dwrd)(gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].block_padr<<23);
+                thenumber=gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].number;
+                
+               
+                ld_cmd_padr+=((thenumber/24)<<10);
+                ld_cmd_padr+=(ceidx<<8);
+                ld_cmd_padr+=(chidx<<5);
+                ld_cmd_padr+=(thenumber%24);
+                if(thenumber<FRAGINBLOCK){
+                    if(((thenumber/FRAGINPAGE)%3==2)&&(thenumber%FRAGINPAGE==23)){lb_cmd_end=1;}
+                }
+                else if(thenumber==FRAGINBLOCK){
+                    
+                    //需要进行cache的替换
+                    for(i=0;i<3;++i){
+                        if(gd_l2p_ch[chidx].cegroup[ceidx].canuse[i]==1){
+                            gd_l2p_ch[chidx].cegroup[ceidx].canuse[i]=0;
+                            cache_padr=gd_l2p_ch[chidx].cegroup[ceidx].cache[i];
+                            cache_idx=i;
+                            break;
+                        
+                        }
+                    }
+                    blocktogc=gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].block_padr;
+                    // gb_blk_type[blocktogc]= VCNT_BLK| GC_BLK;
+                    // gb_blk_type[cache_padr]=HEAD_BLK;
+                    
+                    memset(appear,0,sizeof(appear));
+                    
+                    newblock.number=0;
+                    newblock.block_padr=cache_padr;
+                    for(i=0;i<BUCKETNUM;++i){
+                        newblock.bucketgroup_ptr[0].bucketgroup[i].num=0;
+                        newblock.bucketgroup_ptr[1].bucketgroup[i].num=0;
+                        newblock.bucketgroup_ptr[0].bucketgroup[i].keyvaluegroup=NULL;
+                        newblock.bucketgroup_ptr[1].bucketgroup[i].keyvaluegroup=NULL;
+                    }
+                    for(i=1;i>=0;--i){
+                        for(j=0;j<BUCKETNUM;++j){
+                            for(k=gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[i].bucketgroup[j].num-1;k>=0;--k){
+                                
+                                
+                                ld_src_padr=(blocktogc<<23)+(((gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[i].bucketgroup[j].keyvaluegroup[k].write_offset+i*(1<<16))/FRAGINPAGE)<<10)+(ceidx<<8)+(chidx<<5)+((gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[i].bucketgroup[j].keyvaluegroup[k].write_offset+i*(1<<16))%FRAGINPAGE);
+                                if(appear[gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[i].bucketgroup[j].keyvaluegroup[k].write_offset+i*(1<<16)]==0){
+                                    appear[gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[i].bucketgroup[j].keyvaluegroup[k].write_offset+i*(1<<16)]=1;
+                                    
+                                    ld_dst_padr=(newblock.block_padr<<23)+((newblock.number/FRAGINPAGE)<<10)+(ceidx<<8)+(chidx<<5)+(newblock.number%FRAGINPAGE);
+                                    if(newblock.number<(1<<16)){
+                                        newblock.bucketgroup_ptr[0].bucketgroup[j].keyvaluegroup[newblock.bucketgroup_ptr[0].bucketgroup[j].num].write_offset=newblock.number;
+                                        newblock.bucketgroup_ptr[0].bucketgroup[j].keyvaluegroup[newblock.bucketgroup_ptr[0].bucketgroup[j].num].lba_key=gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[i].bucketgroup[j].keyvaluegroup[k].lba_key;
+                                        newblock.bucketgroup_ptr[0].bucketgroup[j].num++;
+                                    }
+                                    else{
+                                        newblock.bucketgroup_ptr[1].bucketgroup[j].keyvaluegroup[newblock.bucketgroup_ptr[0].bucketgroup[j].num].write_offset=newblock.number-(1<<16);
+                                        newblock.bucketgroup_ptr[1].bucketgroup[j].keyvaluegroup[newblock.bucketgroup_ptr[0].bucketgroup[j].num].lba_key=gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[i].bucketgroup[j].keyvaluegroup[k].lba_key;
+                                        newblock.bucketgroup_ptr[1].bucketgroup[j].num++;
+                                    }
+                                    while(rw_cpua_set & CPUA_ACT);
+                                    rb_cmd_qidx=QLNK_SMQ;
+                                    rd_cmd_cid(0)=(dwrd)rb_gcad_map;
+                                    rd_cmd_padr= ld_src_padr;
+                                    fv_nque_chk(11);
+                                    rw_cmd_bptr = BPTR_INVLD;
+                                    rw_cmd_type = READ_CPTR | LOW_PRI;
+                                    rb_abuf_set = ABUF_ACT | GCRD_BUF;
+                                    
+                                    lb_cmd_end = 0;
+                                    if(((newblock.number/FRAGINPAGE)%3==2)&&(newblock.number%FRAGINPAGE==23)){lb_cmd_end=1;}
+                                    while(rb_gcrd_vld){
+                                    ld_buf_ptr=(dwrd)rw_gcrd_bfp;
+                                    fv_nand_gcprg(lb_cmd_end, ld_buf_ptr, ld_dst_padr);
+                                    }
+                                    newblock.number++;
+                                   
+                                   if(gd_vcnt_tbl[blocktogc] > 0)
+                {
+                    gd_vcnt_tbl[blocktogc]--;
+                }
+                gd_vcnt_tbl[newblock.block_padr]++;
+                                }
+                                
+                            }
+                        }
+                    }
+                gd_l2p_ch[chidx].cegroup[ceidx].canuse[cache_idx]=1;
+                gd_l2p_ch[chidx].cegroup[ceidx].cache[cache_idx]=blocktogc;
+                gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx]=newblock;
+                
+        fv_nand_erase(blocktogc); 
+        ld_cmd_padr = (newblock.block_padr << 23)+((newblock.number/24)<<10)+(ceidx<<8)+(chidx<<5)+(newblock.number%24);
+        if(((newblock.number/24)%3==2)&&(newblock.number%24==23)){lb_cmd_end=1;}
+                }
+        // fv_uart_print("write_logical_padr=%u,write_physical_padr=%u",rs_host_cmd.sd_cmd_padr,ld_cmd_padr);
+        if(lb_p2lp_act) //p2l page
                 {
                     ld_buf_ptr = (FTL_HTP2L_BASE >> 12) | (dwrd)lb_p2lp_ptr;
                     lb_p2lp_act = (lb_p2lp_ptr == 3) ? 0 : 1;
@@ -333,41 +482,52 @@ void fv_ftl_hdl(void)
                         }
                     }
 
-                    //get free block
-                    if((rb_head_stg == 0x0) && ((gw_htp2l_ofs & CMPR_MASK) == 0x0))
-                    {
-                        //check free block
-                        if(gw_fblk_num == 0x0)
-                        {
-                            fv_uart_print("ht free blk zero\r\n");
-                            fv_dbg_loop(0x1);
-                        }
+//                     //get free block
+//                     if((rb_head_stg == 0x0) && ((gw_htp2l_ofs & CMPR_MASK) == 0x0))
+//                     {
+//                         //check free block
+//                         if(gw_fblk_num == 0x0)
+//                         {
+//                             fv_uart_print("ht free blk zero\r\n");
+//                             fv_dbg_loop(0x1);
+//                         }
 
-                        //update blk info
-                        lw_cmd_blk = gw_fblk_str;
-                        gw_fblk_str = (lw_cmd_blk == gw_fblk_end) ? DBLK_INVLD : gs_dbl_tbl[lw_cmd_blk].wd.w_next_ptr;
-                        gb_blk_type[lw_cmd_blk] = HEAD_BLK;
-                        gw_fblk_num--;
-                        fv_uart_print("host_wr get new blk: blk_num:%x, free blk cnt:%d\r\n", lw_cmd_blk, gw_fblk_num);
-                        if(gw_fblk_num == (GC_BLK_THR - 1))
-                        {
-                            fv_uart_print("gc task start: host\r\n");
-                        }
+//                         //update blk info
+//                         lw_cmd_blk = gw_fblk_str;
+//                         gw_fblk_str = (lw_cmd_blk == gw_fblk_end) ? DBLK_INVLD : gs_dbl_tbl[lw_cmd_blk].wd.w_next_ptr;
+//                         gb_blk_type[lw_cmd_blk] = HEAD_BLK;
+//                         gw_fblk_num--;
+//                         fv_uart_print("host_wr get new blk: blk_num:%x, free blk cnt:%d\r\n", lw_cmd_blk, gw_fblk_num);
+//                         if(gw_fblk_num == (GC_BLK_THR - 1))
+//                         {
+//                             fv_uart_print("gc task start: host\r\n");
+//                         }
 
-                        rw_hblk_loc = lw_cmd_blk;
-                        ld_cmd_padr = (dwrd)lw_cmd_blk << (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT);
-#ifdef FTL_DBG
-                        gd_htp2l_ptr = (dwrd)lw_cmd_blk << (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT + CMPR_SHIFT);
-#endif
+//                         rw_hblk_loc = lw_cmd_blk;
+//                         ld_cmd_padr = (dwrd)lw_cmd_blk << (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT);
+// #ifdef FTL_DBG
+//                         gd_htp2l_ptr = (dwrd)lw_cmd_blk << (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT + CMPR_SHIFT);
+// #endif
 
-                        //send erase cmd to HW
-                        while(rw_cpua_set & CPUA_ACT);
-                        fv_nand_erase(lw_cmd_blk);
-                        gd_ecnt_tbl[lw_cmd_blk]++;
-                    }
+//                         //send erase cmd to HW
+//                         while(rw_cpua_set & CPUA_ACT);
+//                         fv_nand_erase(lw_cmd_blk);
+//                         gd_ecnt_tbl[lw_cmd_blk]++;
+//                     }
 
                     //write l2p & vcnt table
-                    gd_l2p_tbl[rs_host_cmd.sd_cmd_ladr] = ld_cmd_padr;
+
+                    if(gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].number<(1<<16)){
+                        gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[0].bucketgroup[smallidx].keyvaluegroup[gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[0].bucketgroup[smallidx].num].lba_key=smalloffset;
+                        gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[0].bucketgroup[smallidx].keyvaluegroup[gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[0].bucketgroup[smallidx].num].write_offset=gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].number;
+                        gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[0].bucketgroup[smallidx].num++;
+                    }
+                    else{
+                        gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[1].bucketgroup[smallidx].keyvaluegroup[gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[0].bucketgroup[smallidx].num].lba_key=smalloffset;
+                        gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[1].bucketgroup[smallidx].keyvaluegroup[gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[0].bucketgroup[smallidx].num].write_offset=gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].number-(1<<16);
+                        gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].bucketgroup_ptr[1].bucketgroup[smallidx].num++;
+                    }
+                    gd_l2p_ch[chidx].cegroup[ceidx].blockgroup[blockidx].number++;
                     gd_vcnt_tbl[rw_hblk_loc]++;
 #ifdef FTL_DBG
                     gb_crl_tbl[rs_host_cmd.sd_cmd_ladr] = (byte)gw_htp2l_ofs & CMPR_MASK;
@@ -653,5 +813,4 @@ void fv_ftl_hdl(void)
 //    }
 
     return;
-    
 }
