@@ -1,14 +1,15 @@
 #include <global.h>
 #include <register.h>
 
-extern ch *gd_l2p_ch;
+extern dwrd *gd_l2p_tbl;
 #ifdef FTL_DBG
 extern dwrd *gd_p2l_tbl;
 extern dwrd *gd_vmap_tbl;
 extern byte *gb_crl_tbl;
 #endif
 
-#define START_PADR (FTL_L2P_BASE+8*sizeof(ch))
+writebuf *writebuffer;
+dwrd buffernum; //最大512
 extern dwrd gd_vcnt_tbl[RBLK_QNTY];
 extern dwrd gd_ecnt_tbl[RBLK_QNTY];
 extern DBL_TBL gs_dbl_tbl[RBLK_QNTY];
@@ -47,7 +48,7 @@ void fv_ers_build(void)
 {
     byte lb_good_blk, lb_ce, lb_chan, lb_cech;
     word lw_blk_ptr;
-    
+
     //L2P Table init
     //dwrd ld_tmp_ptr;
     //for(ld_tmp_ptr = 0; ld_tmp_ptr < L2PE_QNTY; ld_tmp_ptr = ld_tmp_ptr + 1)
@@ -342,38 +343,8 @@ void fv_gctbl_init(void)
 void fv_ftl_pre(void)
 {
     byte lb_cnt;
-    uint32_t i;
-    uint32_t j;
-    uint32_t k;
-    uint32_t l;
-    uint32_t number;
-    gd_l2p_ch = (ch *)(FTL_L2P_BASE);
-    number=0;
-    for(i=0;i<8;++i){
-        for(j=0;j<4;++j){
-            gd_l2p_ch[i].cegroup[j].cache[0]=360;
-            gd_l2p_ch[i].cegroup[j].cache[1]=361;
-            gd_l2p_ch[i].cegroup[j].cache[2]=362;
-            gd_l2p_ch[i].cegroup[j].canuse[0]=1;
-            gd_l2p_ch[i].cegroup[j].canuse[1]=1;
-            gd_l2p_ch[i].cegroup[j].canuse[2]=1;
-            for(k=0;k<360;++k){
-                gd_l2p_ch[i].cegroup[j].blockgroup[k].number=0;
-                gd_l2p_ch[i].cegroup[j].blockgroup[k].block_padr=k;
-                for(l=0;l<512;++l){
-                     gd_l2p_ch[i].cegroup[j].blockgroup[k].bucketgroup_ptr[0].bucketgroup[l].num=0;
-                     gd_l2p_ch[i].cegroup[j].blockgroup[k].bucketgroup_ptr[0].bucketgroup[l].keyvaluegroup=(keyvalue*)(START_PADR+number*256*sizeof(keyvalue));
-                     number++;
-                     gd_l2p_ch[i].cegroup[j].blockgroup[k].bucketgroup_ptr[1].bucketgroup[l].num=0;
-                     gd_l2p_ch[i].cegroup[j].blockgroup[k].bucketgroup_ptr[1].bucketgroup[l].keyvaluegroup=(keyvalue*)(START_PADR+number*256*sizeof(keyvalue));
-                }
-            }
-        }
-    }
-    i=0;
-    j=0;
-    k=0;
-    l=0;
+    buffernum=0;
+    gd_l2p_tbl = (dwrd *)(FTL_L2P_BASE);
 #ifdef FTL_DBG
     gd_p2l_tbl = (dwrd *)(FTL_P2L_BASE);
     gd_vmap_tbl = (dwrd *)(FTL_VMAP_BASE);
