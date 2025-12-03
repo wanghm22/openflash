@@ -108,6 +108,7 @@ void fv_ftl_hdl(void)
     byte bucketidx;
     byte bucketoffset;
     byte find;
+    dwrd allocateppn[BUFFERSIZE];
     int i;
     int j;
     int k;
@@ -303,6 +304,8 @@ void fv_ftl_hdl(void)
                buffernum++;
             }
             else{
+            
+            memset(allocateppn,0,sizeof(allocateppn));
             for(i=0;i<buffernum;++i){
             //set head blk index for p4k_jump
             rb_head_idx = writebuffer[i].stream;//stream id(now always 0)
@@ -341,10 +344,10 @@ void fv_ftl_hdl(void)
                 }
                 else //host write cmd
                 {
-                    ld_buf_ptr = (dwrd)rs_host_cmd.sw_cmd_bfp;
+                    ld_buf_ptr = (dwrd)writebuffer[i].buf_ptr;
 
                     //original vcnt
-                    if(rs_host_cmd.sd_cmd_padr != L2P_NULL)//重写
+                    if(writebuffer[i].ppn != L2P_NULL)//重写
                     {
 #ifdef FTL_DBG
                         byte lb_vmap_ofs;
@@ -356,7 +359,7 @@ void fv_ftl_hdl(void)
                         }
                         gd_vmap_tbl[(rs_host_cmd.sd_cmd_padr >> (5 - CMPR_SHIFT))] &= ~(1 << lb_vmap_ofs);
 #endif
-                        lw_cmd_blk = (word)(rs_host_cmd.sd_cmd_padr >> (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT));
+                        lw_cmd_blk = (word)(writebuffer[i].ppn >> (PAGE_SHIFT + BKCH_SHIFT + FRAG_SHIFT));
                         if(gd_vcnt_tbl[lw_cmd_blk] == 0)
                         {
                             fv_uart_print("host vld cnt table err: block:%x\r\n", lw_cmd_blk);
@@ -430,7 +433,7 @@ void fv_ftl_hdl(void)
                     }
 
                     //write l2p & vcnt table
-                    gd_l2p_tbl[rs_host_cmd.sd_cmd_ladr] = ld_cmd_padr;
+                    gd_l2p_tbl[writebuffer[i].lpn] = ld_cmd_padr;
                     gd_vcnt_tbl[rw_hblk_loc]++;
 #ifdef FTL_DBG
                     gb_crl_tbl[rs_host_cmd.sd_cmd_ladr] = (byte)gw_htp2l_ofs & CMPR_MASK;
@@ -459,7 +462,7 @@ void fv_ftl_hdl(void)
 #endif
                     {
                         //rq_ochk_pat = (qwrd)rs_host_cmd.sd_cmd_padr;
-                        rd_ochk_pat = rs_host_cmd.sd_cmd_padr;
+                        rd_ochk_pat = writebuffer[i].ppn;
                     }
 
 #ifdef FTL_DBG
@@ -475,7 +478,7 @@ void fv_ftl_hdl(void)
 #endif
 
                     //write p2l tmp table
-                    gd_htp2l_ladr[gw_htp2l_ofs & 0x3] = rs_host_cmd.sd_cmd_ladr;
+                    gd_htp2l_ladr[gw_htp2l_ofs & 0x3] = writebuffer[i].lpn;
 
 #ifdef CPUA_PROC
                     //enable cpua_proc
@@ -497,12 +500,12 @@ void fv_ftl_hdl(void)
                     //write l4k/p4k to fw meta
                     if((ld_buf_ptr >> BPTR_SFT) == SMDT_BASE)
                     {
-                        rq_smmt_dat(ld_buf_ptr, (HMETA_QSZ+0)) = ((qwrd)ld_cmd_padr << DWRD_SHIFT) | (qwrd)rs_host_cmd.sd_cmd_ladr;
+                        rq_smmt_dat(ld_buf_ptr, (HMETA_QSZ+0)) = ((qwrd)ld_cmd_padr << DWRD_SHIFT) | (qwrd)writebuffer[i].lpn;
                         memset((byte *)(&rq_smmt_dat(ld_buf_ptr, (HMETA_QSZ+1))), 0, (4*6));
                     }
                     else
                     {
-                        rq_dmmt_dat(ld_buf_ptr, (HMETA_QSZ+0)) = ((qwrd)ld_cmd_padr << DWRD_SHIFT) | (qwrd)rs_host_cmd.sd_cmd_ladr;
+                        rq_dmmt_dat(ld_buf_ptr, (HMETA_QSZ+0)) = ((qwrd)ld_cmd_padr << DWRD_SHIFT) | (qwrd)writebuffer[i].lpn;
                         memset((byte *)(&rq_dmmt_dat(ld_buf_ptr, (HMETA_QSZ+1))), 0, (4*6));
                     }
 
@@ -515,7 +518,7 @@ void fv_ftl_hdl(void)
                     //send program cmd to HW
                     fv_nand_htprg(lb_cmd_end, ld_buf_ptr, ld_cmd_padr);
 #endif
-
+                    
                     //move p2l 4KB data from sram to dram
                     if((gw_htp2l_ofs & 0x3ff) == 0x3ff)
                     {
@@ -652,10 +655,11 @@ void fv_ftl_hdl(void)
             }
 
             //check read unit cnt
-            if(rs_host_cmd.sb_cmd_mued && (rb_frag_loc == 0x0))
+            if(writebuffer[i].mued && (rb_frag_loc == 0x0))
             {
                 break;
             }
+        allocateppn[i] = ld_cmd_padr;
         } }//else if(rs_host_cmd.sb_cmd_type == HCMD_WR)
     }
 #ifdef N4KA_EN
