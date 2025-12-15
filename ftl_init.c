@@ -2,6 +2,7 @@
 #include <register.h>
 
 extern dwrd *gd_l2p_tbl;
+extern level *gd_l2p_section;
 #ifdef FTL_DBG
 extern dwrd *gd_p2l_tbl;
 extern dwrd *gd_vmap_tbl;
@@ -18,7 +19,7 @@ extern byte gb_blk_type[RBLK_QNTY];
 extern word gw_fblk_str;
 extern word gw_fblk_end;
 extern word gw_fblk_num;
-
+extern dwrd writeinit;
 extern PHY_ADR gs_head_padr[HEAD_QNTY];
 
 #ifdef N4KA_EN
@@ -344,7 +345,8 @@ void fv_ftl_pre(void)
 {
     byte lb_cnt;
     buffernum=0;
-    gd_l2p_tbl = (dwrd *)(FTL_L2P_BASE);
+    writeinit=0;
+    gd_l2p_section = (level *)(FTL_L2P_BASE);
 #ifdef FTL_DBG
     gd_p2l_tbl = (dwrd *)(FTL_P2L_BASE);
     gd_vmap_tbl = (dwrd *)(FTL_VMAP_BASE);

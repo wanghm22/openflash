@@ -11,12 +11,16 @@ extern void fv_ftl_oth(void);
 #define GROUPSIZE 256
 #define BUCKETNUM 16
 #define BUFFERSIZE 512
+#define THRESHOLD 1000000
+#define GROUPNUM 4547664
 extern dwrd gd_ht_token;
 extern dwrd gd_gc_token;
 extern dwrd gd_ht_weight;
 extern writebuf* writebuffer;
 extern dwrd buffernum;
-dwrd *gd_l2p_tbl;
+
+byte appear[GROUPSIZE];
+dwrd writeinit;//多于1000000时，清除学习段
 level *gd_l2p_section; //leaFTL:section
 #ifdef FTL_DBG
 dwrd *gd_p2l_tbl;
@@ -34,7 +38,7 @@ byte gb_blk_type[RBLK_QNTY];
 word gw_fblk_str;
 word gw_fblk_end;
 word gw_fblk_num;
-
+int inhash;
 #ifdef GC_SIM
 byte gb_htp2l_num = 0;
 #endif
@@ -44,7 +48,10 @@ PHY_ADR gs_head_padr[HEAD_QNTY];
 word gw_htp2l_bfp = 8;
 word gw_htp2l_ofs = 0;
 dwrd gd_htp2l_ladr[4];
-
+byte new_end;
+byte old_end;
+byte common_end;
+byte common_start ; 
 byte gb_htwl_sel = 0;
 
 #ifdef FTL_DBG
@@ -96,6 +103,91 @@ byte fb_ploc_chk(dwrd id_cmd_padr)
 }
 #endif
 
+
+void Insert(dwrd groupidx, section sec, byte level) {
+    // 获取目标层级结构
+    
+    levelsec* lvlsec;
+    byte i;
+   
+    lvlsec = &gd_l2p_section[groupidx].levelsecgroup[level];
+    
+    // 遍历当前层级的所有section，检查冲突
+    for (i = 0; i < lvlsec->number; i++) {
+        section* old_sec ;
+        old_sec= &lvlsec->secgroup[i];
+        
+        // 计算新旧section的范围
+        
+        old_end= old_sec->start + old_sec->length;
+        
+        new_end= sec.start + sec.length;
+        
+        // 检查是否有范围重叠
+        if (!(new_end <= old_sec->start || sec.start >= old_end)) {
+            // 存在冲突
+            
+            // 检查是否满足合并条件：step相同且有共同元素
+            if (old_sec->step == sec.step) {
+                // 计算共同元素范围
+                
+                common_start=(sec.start > old_sec->start) ? sec.start : old_sec->start;
+                 
+                common_end= (new_end < old_end) ? new_end : old_end;
+                
+                // 检查是否有共同元素
+                if (common_start < common_end) {
+                    // 可以合并，更新旧的section
+                    // 新的起始位置取更小的
+                    if (sec.start < old_sec->start) {
+                        // 需要扩展旧的section到前面
+                        dwrd lba_diff; 
+                        lba_diff= old_sec->start - sec.start;
+                        old_sec->b = sec.b + (lba_diff * sec.step);
+                        old_sec->start = sec.start;
+                    }
+                    
+                    // 新的结束位置取更大的
+                    if (new_end > old_end) {
+                        old_sec->length = new_end - old_sec->start;
+                    } else {
+                        old_sec->length = old_end - old_sec->start;
+                    }
+                    
+                    // 不需要插入新的section，直接返回
+                    return;
+                }
+            }
+            
+            // 不满足合并条件，将旧的section移动到下一层
+            // 如果还有下一层
+            if (level < gd_l2p_section[groupidx].depth - 1) {
+                Insert(groupidx, *old_sec, level + 1);
+            }
+            
+            // 删除当前层的这个section
+            // 将最后一个元素移动到当前位置
+            if (i < lvlsec->number - 1) {
+                lvlsec->secgroup[i] = lvlsec->secgroup[lvlsec->number - 1];
+            }
+            lvlsec->number--;
+            i--; // 重新检查当前位置的新元素
+        }
+    }
+    
+    // 没有冲突或处理完所有冲突后，插入新的section
+    // 检查是否需要扩展数组
+    // 这里假设secgroup有足够的空间，或者由调用者保证
+    if (lvlsec->number >= 255) { // byte的最大值
+        // 错误处理：层级已满
+        return;
+    }
+    
+    // 插入新的section
+    lvlsec->secgroup[lvlsec->number] = sec;
+    lvlsec->number++;
+}
+
 void fv_ftl_hdl(void)
 {
     byte lb_rw_cnt = RWCMD_THR;
@@ -106,12 +198,16 @@ void fv_ftl_hdl(void)
     uint32_t groupidx;
     byte groupoffset;
     byte bucketidx;
-    byte bucketoffset;
+    section sec;
+    word secnum;
+    dwrd nowgroup;
     byte find;
+    byte candelete;
     dwrd allocateppn[BUFFERSIZE];
     int i;
     int j;
     int k;
+    int l;
 #ifdef N4KA_EN
     byte lb_n4rd_vld;
     byte lb_sect_cnt;
@@ -137,12 +233,14 @@ void fv_ftl_hdl(void)
     {
 #ifndef LGET_EN
         //rb_cdir_bas = (byte)rs_host_cmd.sd_cmd_lext;
+        inhash=-1;
         rs_host_cmd.sd_cmd_padr = L2P_NULL;
         groupidx = rs_host_cmd.sd_cmd_padr/GROUPSIZE;
         groupoffset = rs_host_cmd.sd_cmd_padr%GROUPSIZE;
         bucketidx = groupoffset%GROUPSIZE;
         for(i=0;i<gd_l2p_section[groupidx].bucket[bucketidx].num;++i){
             if(gd_l2p_section[groupidx].bucket[bucketidx].kvgroup[i].key == groupoffset){
+                inhash=i;
                 rs_host_cmd.sd_cmd_padr = gd_l2p_section[groupidx].bucket[bucketidx].kvgroup[i].value;
                 break;
             }
@@ -279,8 +377,8 @@ void fv_ftl_hdl(void)
 #endif
             if(buffernum<BUFFERSIZE){
                dwrd mid;
-               dwrd low;
-               dwrd high;
+               int low;
+               int high;
                low=0;
                high=buffernum-1;
                while(low<high){
@@ -293,7 +391,7 @@ void fv_ftl_hdl(void)
                      break;
                   }
                }
-               for(i=buffernum;i>mid;i--){
+               for(i=buffernum;i>low;i--){
                   writebuffer[i]=writebuffer[i-1];
                }
                writebuffer[low].lpn=rs_host_cmd.sd_cmd_ladr;
@@ -301,6 +399,7 @@ void fv_ftl_hdl(void)
                writebuffer[low].ppn=rs_host_cmd.sd_cmd_padr;
                writebuffer[low].mued=rs_host_cmd.sb_cmd_mued;
                writebuffer[low].stream=rs_host_cmd.sb_cmd_strm;
+               writebuffer[low].inhash=inhash;
                buffernum++;
             }
             else{
@@ -433,7 +532,7 @@ void fv_ftl_hdl(void)
                     }
 
                     //write l2p & vcnt table
-                    gd_l2p_tbl[writebuffer[i].lpn] = ld_cmd_padr;
+                    
                     gd_vcnt_tbl[rw_hblk_loc]++;
 #ifdef FTL_DBG
                     gb_crl_tbl[rs_host_cmd.sd_cmd_ladr] = (byte)gw_htp2l_ofs & CMPR_MASK;
@@ -660,7 +759,107 @@ void fv_ftl_hdl(void)
                 break;
             }
         allocateppn[i] = ld_cmd_padr;
-        } }//else if(rs_host_cmd.sb_cmd_type == HCMD_WR)
+        } 
+    
+    secnum=0;
+    for(i=0;i<=buffernum;++i){
+        if(secnum==0){
+            sec.start=(byte)(writebuffer[i].lpn%GROUPSIZE);
+            sec.b=allocateppn[i];
+            nowgroup=writebuffer[i].lpn/GROUPSIZE;
+        }
+        else{
+            if(i==buffernum||((i<buffernum)&&((writebuffer[i].lpn/GROUPSIZE)!=nowgroup))){
+                if(secnum==1){
+                    if(writebuffer[i-1].inhash==-1){
+                        gd_l2p_section[nowgroup].bucket[sec.start%16].kvgroup[gd_l2p_section[nowgroup].bucket[sec.start%16].num].key=sec.start;
+                        gd_l2p_section[nowgroup].bucket[sec.start%16].kvgroup[gd_l2p_section[nowgroup].bucket[sec.start%16].num].value=sec.b;
+                        gd_l2p_section[nowgroup].bucket[sec.start%16].num++;
+                    }
+                    else{
+                        gd_l2p_section[nowgroup].bucket[sec.start%16].kvgroup[writebuffer[i-1].inhash].key=sec.start;
+                        gd_l2p_section[nowgroup].bucket[sec.start%16].kvgroup[writebuffer[i-1].inhash].value=sec.b;
+                    }
+                }
+                else{
+                    Insert(nowgroup,sec,0);
+                    for(j=0;j<=sec.length/sec.step;++j){
+                        if(writebuffer[i-j-1].inhash!=-1){
+                            for(k=writebuffer[i].inhash;k<gd_l2p_section[nowgroup].bucket[sec.start%16].num-1;++k){
+                                gd_l2p_section[nowgroup].bucket[sec.start%16].kvgroup[k]=gd_l2p_section[nowgroup].bucket[sec.start%16].kvgroup[k+1];
+                            }
+                            gd_l2p_section[nowgroup].bucket[sec.start%16].num--;
+                        }
+                    }
+                }
+                if(i<buffernum){
+                sec.length=0;
+                sec.step=0;
+                sec.start=writebuffer[i].lpn;
+                sec.b=allocateppn[i];
+                secnum=1;
+                nowgroup=writebuffer[i].lpn/GROUPSIZE;
+            }
+            }
+            else{
+                if(secnum==1){sec.step=(byte)((writebuffer[i].lpn%GROUPSIZE)-sec.start);sec.length=(byte)((writebuffer[i].lpn%GROUPSIZE)-sec.start);secnum++;}
+                else{
+                    if(((writebuffer[i].lpn%GROUPSIZE)-sec.start-sec.length!=sec.step)||(allocateppn[i]-(sec.b+sec.length/sec.step))!=1){
+                       Insert(nowgroup,sec,0);
+                    for(j=0;j<=sec.length/sec.step;++j){
+                        if(writebuffer[i-j-1].inhash!=-1){
+                            for(k=writebuffer[i].inhash;k<gd_l2p_section[nowgroup].bucket[sec.start%16].num-1;++k){
+                                gd_l2p_section[nowgroup].bucket[sec.start%16].kvgroup[k]=gd_l2p_section[nowgroup].bucket[sec.start%16].kvgroup[k+1];
+                            }
+                            gd_l2p_section[nowgroup].bucket[sec.start%16].num--;
+                        }
+                    }
+                
+                
+                sec.length=0;
+                sec.step=0;
+                sec.start=writebuffer[i].lpn;
+                sec.b=allocateppn[i];
+                secnum=1;
+                }
+            
+                    
+                else{
+                     sec.length=(byte)((writebuffer[i].lpn%GROUPSIZE)-sec.start);secnum++;
+                    }
+                }
+            }
+        }
+    }
+    writeinit+=buffernum;
+    if(writeinit>THRESHOLD){
+      for(i=0;i<GROUPNUM;++i){
+        if(gd_l2p_section[i].depth==0){continue;}
+        memset(appear,0,sizeof(appear));
+        for(j=0;j<gd_l2p_section[i].depth;++j){
+            k=0;
+            while(1){
+                if(k>=gd_l2p_section[i].levelsecgroup[j].number){break;}
+                candelete=1;
+               for(l=0;l<=(gd_l2p_section[i].levelsecgroup[j].secgroup[k].length/gd_l2p_section[i].levelsecgroup[j].secgroup[k].step);++l){
+                if(appear[(gd_l2p_section[i].levelsecgroup[j].secgroup[k].b+l*gd_l2p_section[i].levelsecgroup[j].secgroup[k].step)]==0){
+                    candelete=0;
+                    appear[(gd_l2p_section[i].levelsecgroup[j].secgroup[k].b+l*gd_l2p_section[i].levelsecgroup[j].secgroup[k].step)]=1;}
+                    
+                }
+                if(candelete==1){
+                    for(l=k;l<gd_l2p_section[i].levelsecgroup[j].number-1;++l){
+                        gd_l2p_section[i].levelsecgroup[j].secgroup[l]=gd_l2p_section[i].levelsecgroup[j].secgroup[l+1];
+                    }
+                    gd_l2p_section[i].levelsecgroup[j].number--;
+                }
+                k++;
+            }
+        }
+      }
+    }
+    buffernum=0;
+    }//else if(rs_host_cmd.sb_cmd_type == HCMD_WR)
     }
 #ifdef N4KA_EN
         //nand write non 4KB cmd handle

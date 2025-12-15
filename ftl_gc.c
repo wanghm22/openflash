@@ -603,7 +603,7 @@ void fv_ftl_gc(void)
 #endif
 
                             //write l2p & vcnt table
-                            gd_l2p_tbl[ld_cmd_ladr] = ld_cmd_padr;
+                            // gd_l2p_tbl[ld_cmd_ladr] = ld_cmd_padr;
                             gd_vcnt_tbl[rw_hblk_loc]++;
 #ifdef FTL_DBG
                             gb_crl_tbl[ld_cmd_ladr] = (byte)gw_gcp2l_ofs & CMPR_MASK;
